@@ -30,7 +30,7 @@ fn to_f32( x: u32x4 ) -> f32x4 {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AABB {
     center: Vector3,
     extent: Vector3
@@ -117,7 +117,8 @@ impl Volume {
 
         return true;
     }
-
+    
+    #[inline(never)]
     fn contains_bulk( &self, aabbs: &[AABB] ) -> Vec<bool> {
         let mut result = Vec::with_capacity( aabbs.len() );
 
@@ -128,7 +129,6 @@ impl Volume {
         result
     }
 
-    #[inline(never)]
     fn contains_simd( &self, aabb: &AABB ) -> bool {
         let sign_mask = u32x4::splat( 0x80000000 );
 
@@ -154,8 +154,6 @@ impl Volume {
         let center_y = f32x4::splat( aabb.center[1] );
         let center_z = f32x4::splat( aabb.center[2] );
 
-        let mut bits = 0xf;
-
         for pidx in ( 0..num_planes_4 ).step_by(4) {
             let plane_x = f32x4::load( &planes_x, pidx );
             let plane_y = f32x4::load( &planes_y, pidx );
@@ -171,17 +169,21 @@ impl Volume {
 
             let dot = ( t_x * plane_x ) + ( t_y * plane_y ) + ( t_z * plane_z ) + plane_w;
                 
-            bits &= !dot.move_mask();
+            if dot.move_mask() != 0 {
+                return false;
+            }
         }
 
-        bits == 0xf
+        return true;
     }
 
 
+    #[inline(never)]
     fn contains_bulk_simd( &self, aabbs: &[AABB] ) -> Vec<bool> {
         let sign_mask = u32x4::splat( 0x80000000 );
 
         let num_planes_4 = ( self.planes.len() + 3 ) & !3;
+
         let mut planes_x = Vec::with_capacity( num_planes_4 );
         let mut planes_y = Vec::with_capacity( num_planes_4 );
         let mut planes_z = Vec::with_capacity( num_planes_4 );
@@ -197,37 +199,43 @@ impl Volume {
         }
 
         let mut result = Vec::with_capacity( aabbs.len() );
+        unsafe{ result.set_len( aabbs.len() ); }
 
-        for idx in 0..aabbs.len() {
-            let aabb = &aabbs[idx];
-            let extent_x = f32x4::splat( aabb.extent[0] );
-            let extent_y = f32x4::splat( aabb.extent[1] );
-            let extent_z = f32x4::splat( aabb.extent[2] );
-            let center_x = f32x4::splat( aabb.center[0] );
-            let center_y = f32x4::splat( aabb.center[1] );
-            let center_z = f32x4::splat( aabb.center[2] );
+        {
+            let mut rs = result.as_mut_slice();
 
-            let mut bits = 0xf;
+            for idx in 0..aabbs.len() {
+                let aabb = &aabbs[idx];
+                let extent_x = f32x4::splat( aabb.extent[0] );
+                let extent_y = f32x4::splat( aabb.extent[1] );
+                let extent_z = f32x4::splat( aabb.extent[2] );
+                let center_x = f32x4::splat( aabb.center[0] );
+                let center_y = f32x4::splat( aabb.center[1] );
+                let center_z = f32x4::splat( aabb.center[2] );
 
-            for pidx in ( 0..num_planes_4 ).step_by(4) {
-                let plane_x = f32x4::load( &planes_x, pidx );
-                let plane_y = f32x4::load( &planes_y, pidx );
-                let plane_z = f32x4::load( &planes_z, pidx );
-                let plane_w = f32x4::load( &planes_w, pidx );
+                rs[idx] = true;
 
-                let e_x = to_u32( extent_x ) ^ ( to_u32( plane_x ) & sign_mask );
-                let t_x = center_x + to_f32( e_x );
-                let e_y = to_u32( extent_y ) ^ ( to_u32( plane_y ) & sign_mask );
-                let t_y = center_y + to_f32( e_y );
-                let e_z = to_u32( extent_z ) ^ ( to_u32( plane_z ) & sign_mask );
-                let t_z = center_z + to_f32( e_z );
+                for pidx in ( 0..num_planes_4 ).step_by(4) {
+                    let plane_x = f32x4::load( &planes_x, pidx );
+                    let plane_y = f32x4::load( &planes_y, pidx );
+                    let plane_z = f32x4::load( &planes_z, pidx );
+                    let plane_w = f32x4::load( &planes_w, pidx );
 
-                let dot = ( t_x * plane_x ) + ( t_y * plane_y ) + ( t_z * plane_z ) + plane_w;
+                    let e_x = to_u32( extent_x ) ^ ( to_u32( plane_x ) & sign_mask );
+                    let t_x = center_x + to_f32( e_x );
+                    let e_y = to_u32( extent_y ) ^ ( to_u32( plane_y ) & sign_mask );
+                    let t_y = center_y + to_f32( e_y );
+                    let e_z = to_u32( extent_z ) ^ ( to_u32( plane_z ) & sign_mask );
+                    let t_z = center_z + to_f32( e_z );
 
-                bits &= !dot.move_mask();
+                    let dot = ( t_x * plane_x ) + ( t_y * plane_y ) + ( t_z * plane_z ) + plane_w;
+
+                    if dot.move_mask() != 0 {
+                        rs[idx] = false;
+                        break;
+                    }
+                }
             }
-
-            result.push( bits == 0xf );
         }
 
         result
@@ -304,11 +312,61 @@ mod tests {
         Volume::from_cube( &Vector3::new( 500.0, 500.0, 500.0 ) ).transform( &mat )
     }
 
+    fn test_all( volume : &Volume, aabb : &AABB ) -> bool {
+        let base_result = volume.contains( aabb );
+        let simd_result = volume.contains_simd( aabb );
+        assert_eq!( base_result, simd_result );
+
+        let mut aabbs = Vec::new();
+        aabbs.push( aabb.clone() );
+        let bulk_result = volume.contains_bulk( &aabbs );
+        assert!( bulk_result.len() == 1 );
+        assert_eq!( base_result, bulk_result[0] );
+
+        let bulk_simd_result = volume.contains_bulk_simd( &aabbs );
+        assert!( bulk_simd_result.len() == 1 );
+        assert_eq!( base_result, bulk_simd_result[0] );
+
+        base_result
+    }
+
+    #[test]
+    fn inside_cube() {
+        let volume = Volume::from_cube( &Vector3::new( 10.0, 10.0, 10.0 ) );
+        let aabb = AABB::new( Vector3::new( 5.0, 5.0, 5.0 ), Vector3::new( 1.0, 1.0, 1.0 ) );
+        assert_eq!( test_all( &volume, &aabb ), true );
+    }
+
+    #[test]
+    fn outside_cube() {
+        let volume = Volume::from_cube( &Vector3::new( 10.0, 10.0, 10.0 ) );
+        let aabb = AABB::new( Vector3::new( 15.0, 15.0, 15.0 ), Vector3::new( 1.0, 1.0, 1.0 ) );
+        assert_eq!( test_all( &volume, &aabb ), false );
+    }
+
+    #[test]
+    fn intersecting_cube() {
+        let volume = Volume::from_cube( &Vector3::new( 10.0, 10.0, 10.0 ) );
+        let aabb = AABB::new( Vector3::new( 9.5, 9.5, 9.5 ), Vector3::new( 1.0, 1.0, 1.0 ) );
+        assert_eq!( test_all( &volume, &aabb ), true );
+    }
+
+    #[test]
+    fn compare_bulk() {
+        let volume = test_volume();
+        let aabbs = random_aabbs( 100 );
+
+        let bulk_non_simd = volume.contains_bulk( &aabbs );
+        let bulk_with_simd = volume.contains_bulk_simd( &aabbs );
+
+        assert_eq!( bulk_with_simd, bulk_non_simd );
+    }
+
 
     #[bench]
     fn bench_volume_aabb(b: &mut Bencher) {
         let volume = test_volume();
-        let aabbs = random_aabbs( 100000 );
+        let aabbs = random_aabbs( 1000 );
 
         b.iter(|| {
             let mut v = Vec::with_capacity( aabbs.len() );
@@ -321,7 +379,7 @@ mod tests {
     #[bench]
     fn bench_volume_aabb_simd(b: &mut Bencher) {
         let volume = test_volume();
-        let aabbs = random_aabbs( 100000 );
+        let aabbs = random_aabbs( 1000 );
 
         b.iter(|| {
             let mut v = Vec::with_capacity( aabbs.len() );
@@ -334,7 +392,7 @@ mod tests {
     #[bench]
     fn bench_volume_aabb_bulk(b: &mut Bencher) {
         let volume = test_volume();
-        let aabbs = random_aabbs( 100000 );
+        let aabbs = random_aabbs( 1000 );
 
         b.iter(|| volume.contains_bulk( aabbs.as_slice() ) );
     }
@@ -342,7 +400,7 @@ mod tests {
     #[bench]
     fn bench_volume_aabb_bulk_simd(b: &mut Bencher) {
         let volume = test_volume();
-        let aabbs = random_aabbs( 100000 );
+        let aabbs = random_aabbs( 1000 );
 
         b.iter(|| volume.contains_bulk_simd( aabbs.as_slice() ) );
     }
