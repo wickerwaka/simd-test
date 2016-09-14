@@ -2,6 +2,7 @@
 name = "aosoa"
 version = "0.1.0"
 authors = ["Martin Donlon <martin.donlon@gmail.com>"]
+build = "build.rs"
 
 [profile.release]
 debug = true
@@ -11,3 +12,7 @@ time = "0.1.35"
 cgmath = "0.11.0"
 rand = "0.3.14"
 simd = { path = "../simd" }
+
+[build-dependencies]
+gcc = "0.3"
+

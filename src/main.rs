@@ -31,12 +31,14 @@ fn to_f32( x: u32x4 ) -> f32x4 {
 
 
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub struct AABB {
     center: Vector3,
     extent: Vector3
 }
 
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub struct Plane {
     n: Vector3,
     d: f32
@@ -45,6 +47,11 @@ pub struct Plane {
 #[derive(Debug)]
 pub struct Volume {
     planes: Vec<Plane>
+}
+
+extern {
+    fn contains_bulk_c( planes: *const Plane, plane_count: usize, aabbs: *const AABB, aabb_count: usize, results: *mut bool );
+    fn contains_bulk_c_simd( planes: *const Plane, plane_count: usize, aabbs: *const AABB, aabb_count: usize, results: *mut bool );
 }
 
 impl AABB {
@@ -215,7 +222,9 @@ impl Volume {
 
                 rs[idx] = true;
 
-                for pidx in ( 0..num_planes_4 ).step_by(4) {
+                let mut pidx = 0;
+
+                while pidx < num_planes_4 {
                     let plane_x = f32x4::load( &planes_x, pidx );
                     let plane_y = f32x4::load( &planes_y, pidx );
                     let plane_z = f32x4::load( &planes_z, pidx );
@@ -234,11 +243,30 @@ impl Volume {
                         rs[idx] = false;
                         break;
                     }
+                    pidx += 4;
                 }
             }
         }
 
         result
+    }
+
+    fn contains_bulk_c( &self, aabbs: &[AABB] ) -> Vec<bool> {
+        let mut results = Vec::with_capacity( aabbs.len() );
+        unsafe {
+            results.set_len( aabbs.len() );
+            contains_bulk_c( self.planes.as_ptr(), self.planes.len(), aabbs.as_ptr(), aabbs.len(), results.as_mut_ptr() );
+        }
+        results
+    }
+
+    fn contains_bulk_c_simd( &self, aabbs: &[AABB] ) -> Vec<bool> {
+        let mut results = Vec::with_capacity( aabbs.len() );
+        unsafe {
+            results.set_len( aabbs.len() );
+            contains_bulk_c_simd( self.planes.as_ptr(), self.planes.len(), aabbs.as_ptr(), aabbs.len(), results.as_mut_ptr() );
+        }
+        results
     }
 
     fn transform( &self, mat: &Matrix4 ) -> Volume {
@@ -255,6 +283,7 @@ impl Volume {
         }
     }
 }
+
 
 fn main() {
     let volume = Volume::from_planes( &[
@@ -327,6 +356,11 @@ mod tests {
         assert!( bulk_simd_result.len() == 1 );
         assert_eq!( base_result, bulk_simd_result[0] );
 
+        let bulk_c_result = volume.contains_bulk_c( &aabbs );
+        assert!( bulk_c_result.len() == 1 );
+        println!( "{:?}", bulk_c_result );
+        assert_eq!( base_result, bulk_c_result[0] );
+
         base_result
     }
 
@@ -396,6 +430,23 @@ mod tests {
 
         b.iter(|| volume.contains_bulk( aabbs.as_slice() ) );
     }
+
+    #[bench]
+    fn bench_volume_aabb_bulk_c(b: &mut Bencher) {
+        let volume = test_volume();
+        let aabbs = random_aabbs( 1000 );
+
+        b.iter(|| volume.contains_bulk_c( aabbs.as_slice() ) );
+    }
+
+    #[bench]
+    fn bench_volume_aabb_bulk_c_simd(b: &mut Bencher) {
+        let volume = test_volume();
+        let aabbs = random_aabbs( 1000 );
+
+        b.iter(|| volume.contains_bulk_c_simd( aabbs.as_slice() ) );
+    }
+
 
     #[bench]
     fn bench_volume_aabb_bulk_simd(b: &mut Bencher) {
