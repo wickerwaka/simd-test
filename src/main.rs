@@ -187,22 +187,25 @@ impl Volume {
 
     #[inline(never)]
     fn contains_bulk_simd( &self, aabbs: &[AABB] ) -> Vec<bool> {
+        struct PlaneBlock(f32x4,f32x4,f32x4,f32x4);
         let sign_mask = u32x4::splat( 0x80000000 );
 
-        let num_planes_4 = ( self.planes.len() + 3 ) & !3;
+        let num_planes_4 = ( self.planes.len() + 3 ) / 4;
 
-        let mut planes_x = Vec::with_capacity( num_planes_4 );
-        let mut planes_y = Vec::with_capacity( num_planes_4 );
-        let mut planes_z = Vec::with_capacity( num_planes_4 );
-        let mut planes_w = Vec::with_capacity( num_planes_4 );
+        let mut planes = Vec::with_capacity( num_planes_4 );
 
         let mut it = self.planes.iter().cycle();
-        for _ in 0..num_planes_4 {
-            let plane = it.next().unwrap();
-            planes_x.push( plane.n[0] );
-            planes_y.push( plane.n[1] );
-            planes_z.push( plane.n[2] );
-            planes_w.push( plane.d );
+        for _ in 0.. num_planes_4 {
+            let plane1 = it.next().unwrap();
+            let plane2 = it.next().unwrap();
+            let plane3 = it.next().unwrap();
+            let plane4 = it.next().unwrap();
+            planes.push( PlaneBlock(
+                f32x4::new( plane1.n[0], plane2.n[0], plane3.n[0], plane4.n[0] ),
+                f32x4::new( plane1.n[1], plane2.n[1], plane3.n[1], plane4.n[1] ),
+                f32x4::new( plane1.n[2], plane2.n[2], plane3.n[2], plane4.n[2] ),
+                f32x4::new( plane1.d, plane2.d, plane3.d, plane4.d )
+            ) );
         }
 
         let mut result = Vec::with_capacity( aabbs.len() );
@@ -222,28 +225,20 @@ impl Volume {
 
                 rs[idx] = true;
 
-                let mut pidx = 0;
-
-                while pidx < num_planes_4 {
-                    let plane_x = f32x4::load( &planes_x, pidx );
-                    let plane_y = f32x4::load( &planes_y, pidx );
-                    let plane_z = f32x4::load( &planes_z, pidx );
-                    let plane_w = f32x4::load( &planes_w, pidx );
-
-                    let e_x = to_u32( extent_x ) ^ ( to_u32( plane_x ) & sign_mask );
+                for plane in planes.iter() {
+                    let e_x = to_u32( extent_x ) ^ ( to_u32( plane.0 ) & sign_mask );
                     let t_x = center_x + to_f32( e_x );
-                    let e_y = to_u32( extent_y ) ^ ( to_u32( plane_y ) & sign_mask );
+                    let e_y = to_u32( extent_y ) ^ ( to_u32( plane.1 ) & sign_mask );
                     let t_y = center_y + to_f32( e_y );
-                    let e_z = to_u32( extent_z ) ^ ( to_u32( plane_z ) & sign_mask );
+                    let e_z = to_u32( extent_z ) ^ ( to_u32( plane.2 ) & sign_mask );
                     let t_z = center_z + to_f32( e_z );
 
-                    let dot = ( t_x * plane_x ) + ( t_y * plane_y ) + ( t_z * plane_z ) + plane_w;
+                    let dot = ( t_x * plane.0 ) + ( t_y * plane.1 ) + ( t_z * plane.2 ) + plane.3;
 
                     if dot.move_mask() != 0 {
                         rs[idx] = false;
                         break;
                     }
-                    pidx += 4;
                 }
             }
         }
